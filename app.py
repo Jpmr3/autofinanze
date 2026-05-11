@@ -4,6 +4,7 @@ import secrets
 import sqlite3
 import hmac
 import hashlib
+import time
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -351,7 +352,9 @@ def dashboard():
         leads = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
         paid_orders = conn.execute("SELECT COUNT(*) c FROM orders WHERE status = 'paid'").fetchone()["c"]
         revenue = conn.execute("SELECT COALESCE(SUM(amount_cents),0) c FROM orders WHERE status='paid'").fetchone()["c"]
-        avg_ticket = round(revenue / paid_orders) if paid_orders else 0
+        avg_ticket = int(
+            (Decimal(revenue) / Decimal(paid_orders)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        ) if paid_orders else 0
         conversion = (paid_orders / leads * 100) if leads else 0
     return html_page(
         "Dashboard",
@@ -412,6 +415,12 @@ def verify_stripe_signature(payload: bytes, signature_header: str, secret: str) 
     timestamp = parts.get("t")
     signature = parts.get("v1")
     if not timestamp or not signature:
+        return False
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+    if abs(int(time.time()) - ts) > 300:
         return False
     signed_payload = f"{timestamp}.{payload.decode('utf-8')}".encode("utf-8")
     expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
@@ -559,7 +568,7 @@ def app(environ, start_response):
             record_event("upsell_purchase", source["email"], f"source_order={source_order_id}")
             status, headers, body = redirect(f"/thank-you?order={order_id}")
     elif method == "POST" and path == "/automation/run":
-        key = environ.get("HTTP_X_AUTOMATION_KEY", "") or (qs.get("key") or [""])[0]
+        key = environ.get("HTTP_X_AUTOMATION_KEY", "")
         if not AUTOMATION_RUN_KEY:
             status, headers, body = response_json({"ok": False, "error": "automation key no configurada"}, "503 Service Unavailable")
         elif not secrets.compare_digest(key, AUTOMATION_RUN_KEY):

@@ -23,6 +23,7 @@ class AutofinanzeAppTests(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
         os.environ.pop("AUTOFINANZE_DB", None)
+        os.environ.pop("AUTOFINANZE_BASE_URL", None)
         os.environ.pop("AUTOMATION_RUN_KEY", None)
         os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 
@@ -106,7 +107,12 @@ class AutofinanzeAppTests(unittest.TestCase):
         )
         with self.app_module.get_db() as conn:
             conn.execute("UPDATE followups SET scheduled_at='2000-01-01T00:00:00+00:00' WHERE email='auto@mail.com'")
-        status, _, body = self._call("POST", "/automation/run?key=test-key", "")
+        status, _, body = self._call(
+            "POST",
+            "/automation/run",
+            "",
+            extra_environ={"HTTP_X_AUTOMATION_KEY": "test-key"},
+        )
         self.assertTrue(status.startswith("200"))
         self.assertIn('"sent": 2', body)
         with self.app_module.get_db() as conn:
