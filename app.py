@@ -16,7 +16,7 @@ BASE_URL = os.getenv("AUTOFINANZE_BASE_URL", "http://127.0.0.1:8000")
 OFFER_NAME = os.getenv("OFFER_NAME", "Sistema Ingresos Rápidos MVP")
 OFFER_PRICE_CENTS = int(os.getenv("OFFER_PRICE_CENTS", "4900"))
 OFFER_CURRENCY = "EUR"
-TAX_RATE = 0.21
+TAX_RATE = Decimal("0.21")
 UPSELL_PRICE_CENTS = int(os.getenv("UPSELL_PRICE_CENTS", "19900"))
 UPSELL_NAME = os.getenv("UPSELL_NAME", "Implementación asistida 1:1")
 FOLLOWUP_SCHEDULE = [
@@ -132,7 +132,7 @@ def record_event(event_type: str, email: str = "", metadata: str = ""):
 
 def create_invoice(conn, order_id: int, total_cents: int):
     tax_cents = int(
-        (Decimal(total_cents) * Decimal(str(TAX_RATE))).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        (Decimal(total_cents) * TAX_RATE).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     )
     subtotal_cents = total_cents - tax_cents
     invoice_number = f"INV-{datetime.now().strftime('%Y%m')}-{order_id:06d}"
@@ -206,7 +206,7 @@ def html_page(title: str, body: str):
 
 
 def landing():
-    stripe_cta = (
+    payment_cta = (
         f'<a class="btn" href="{escape(STRIPE_PAYMENT_LINK)}">Pagar ahora con Stripe</a>'
         if STRIPE_PAYMENT_LINK
         else '<a class="btn" href="/checkout">Comprar ahora</a>'
@@ -223,7 +223,7 @@ def landing():
     <li>Entrega automática tras pago</li>
     <li>Facturación básica y métricas</li>
   </ul>
-  {stripe_cta}
+  {payment_cta}
 </div>
 <div class="card">
   <h3>Prueba social</h3>
@@ -343,7 +343,7 @@ def dashboard():
         leads = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
         paid_orders = conn.execute("SELECT COUNT(*) c FROM orders WHERE status = 'paid'").fetchone()["c"]
         revenue = conn.execute("SELECT COALESCE(SUM(amount_cents),0) c FROM orders WHERE status='paid'").fetchone()["c"]
-        avg_ticket = int(round(revenue / paid_orders)) if paid_orders else 0
+        avg_ticket = round(revenue / paid_orders) if paid_orders else 0
         conversion = (paid_orders / leads * 100) if leads else 0
     return html_page(
         "Dashboard",
