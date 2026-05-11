@@ -14,10 +14,18 @@ from wsgiref.simple_server import make_server
 DB_PATH = os.getenv("AUTOFINANZE_DB", os.path.join(os.path.dirname(__file__), "autofinanze.db"))
 BASE_URL = os.getenv("AUTOFINANZE_BASE_URL", "http://127.0.0.1:8000")
 OFFER_NAME = os.getenv("OFFER_NAME", "Sistema Ingresos Rápidos MVP")
-OFFER_PRICE_CENTS = int(os.getenv("OFFER_PRICE_CENTS", "4900"))
+def int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+OFFER_PRICE_CENTS = int_env("OFFER_PRICE_CENTS", 4900)
 OFFER_CURRENCY = "EUR"
 TAX_RATE = Decimal("0.21")
-UPSELL_PRICE_CENTS = int(os.getenv("UPSELL_PRICE_CENTS", "19900"))
+UPSELL_PRICE_CENTS = int_env("UPSELL_PRICE_CENTS", 19900)
 UPSELL_NAME = os.getenv("UPSELL_NAME", "Implementación asistida 1:1")
 FOLLOWUP_SCHEDULE = [
     ("email", "¿Te ayudo a implementar el sistema en 24h?", 1),
@@ -135,7 +143,7 @@ def create_invoice(conn, order_id: int, total_cents: int):
         (Decimal(total_cents) * TAX_RATE).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     )
     subtotal_cents = total_cents - tax_cents
-    invoice_number = f"INV-{datetime.now().strftime('%Y%m')}-{order_id:06d}"
+    invoice_number = f"INV-{datetime.now(timezone.utc).strftime('%Y%m')}-{order_id:06d}"
     conn.execute(
         """
         INSERT INTO invoices(order_id, invoice_number, subtotal_cents, tax_cents, total_cents, status, created_at)
@@ -551,7 +559,7 @@ def app(environ, start_response):
             record_event("upsell_purchase", source["email"], f"source_order={source_order_id}")
             status, headers, body = redirect(f"/thank-you?order={order_id}")
     elif method == "POST" and path == "/automation/run":
-        key = (qs.get("key") or [""])[0]
+        key = environ.get("HTTP_X_AUTOMATION_KEY", "") or (qs.get("key") or [""])[0]
         if not AUTOMATION_RUN_KEY:
             status, headers, body = response_json({"ok": False, "error": "automation key no configurada"}, "503 Service Unavailable")
         elif not secrets.compare_digest(key, AUTOMATION_RUN_KEY):
