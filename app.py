@@ -2,6 +2,8 @@ import json
 import os
 import secrets
 import sqlite3
+import hmac
+import hashlib
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -17,11 +19,12 @@ OFFER_CURRENCY = "EUR"
 TAX_RATE = 0.21
 UPSELL_PRICE_CENTS = int(os.getenv("UPSELL_PRICE_CENTS", "19900"))
 UPSELL_NAME = os.getenv("UPSELL_NAME", "Implementación asistida 1:1")
-FOLLOWUP_TEMPLATES = [
+FOLLOWUP_SCHEDULE = [
     ("email", "¿Te ayudo a implementar el sistema en 24h?", 1),
     ("whatsapp", "Plantilla rápida para captar más ventas hoy", 3),
 ]
 STRIPE_PAYMENT_LINK = os.getenv("STRIPE_PAYMENT_LINK", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 AUTOMATION_RUN_KEY = os.getenv("AUTOMATION_RUN_KEY", "").strip()
 
 
@@ -103,13 +106,17 @@ def money(cents: int) -> str:
     return f"{cents / 100:.2f} {OFFER_CURRENCY}"
 
 
-def parse_post_data(environ):
+def read_request_body(environ) -> bytes:
     try:
         length = int(environ.get("CONTENT_LENGTH", "0"))
     except ValueError:
         length = 0
-    raw = environ["wsgi.input"].read(length).decode("utf-8") if length > 0 else ""
-    content_type = (environ.get("CONTENT_TYPE") or "").lower()
+    return environ["wsgi.input"].read(length) if length > 0 else b""
+
+
+def parse_post_data(raw_body: bytes, content_type: str):
+    raw = raw_body.decode("utf-8")
+    content_type = (content_type or "").lower()
     if "application/json" in content_type:
         return json.loads(raw or "{}")
     return {k: v[0] for k, v in parse_qs(raw).items()}
@@ -148,7 +155,7 @@ def create_delivery(conn, order_id: int):
 
 
 def schedule_followups(conn, email: str):
-    for channel, message, days in FOLLOWUP_TEMPLATES:
+    for channel, message, days in FOLLOWUP_SCHEDULE:
         at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
         conn.execute(
             """
@@ -336,7 +343,7 @@ def dashboard():
         leads = conn.execute("SELECT COUNT(*) c FROM leads").fetchone()["c"]
         paid_orders = conn.execute("SELECT COUNT(*) c FROM orders WHERE status = 'paid'").fetchone()["c"]
         revenue = conn.execute("SELECT COALESCE(SUM(amount_cents),0) c FROM orders WHERE status='paid'").fetchone()["c"]
-        avg_ticket = int(revenue / paid_orders) if paid_orders else 0
+        avg_ticket = int(round(revenue / paid_orders)) if paid_orders else 0
         conversion = (paid_orders / leads * 100) if leads else 0
     return html_page(
         "Dashboard",
@@ -385,6 +392,24 @@ def response_json(obj, code: str = "200 OK"):
     return code, [("Content-Type", "application/json; charset=utf-8")], json.dumps(obj).encode("utf-8")
 
 
+def verify_stripe_signature(payload: bytes, signature_header: str, secret: str) -> bool:
+    if not payload or not signature_header or not secret:
+        return False
+    parts = {}
+    for chunk in signature_header.split(","):
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        parts[key.strip()] = value.strip()
+    timestamp = parts.get("t")
+    signature = parts.get("v1")
+    if not timestamp or not signature:
+        return False
+    signed_payload = f"{timestamp}.{payload.decode('utf-8')}".encode("utf-8")
+    expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return secrets.compare_digest(expected, signature)
+
+
 def _run_pending_followups():
     sent_count = 0
     with get_db() as conn:
@@ -408,12 +433,13 @@ def app(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO", "/")
     qs = parse_qs(environ.get("QUERY_STRING", ""))
+    raw_body = read_request_body(environ) if method == "POST" else b""
     record_event("visit" if path == "/" and method == "GET" else "request", metadata=f"{method} {path}")
 
     if method == "GET" and path == "/":
         status, headers, body = response_html(landing())
     elif method == "POST" and path == "/lead":
-        data = parse_post_data(environ)
+        data = parse_post_data(raw_body, environ.get("CONTENT_TYPE", ""))
         email = (data.get("email") or "").strip().lower()
         source = (data.get("source") or "direct").strip()
         if not email:
@@ -430,7 +456,7 @@ def app(environ, start_response):
         email = (qs.get("email", [""])[0] or "").strip().lower()
         status, headers, body = response_html(checkout(email))
     elif method == "POST" and path == "/pay":
-        data = parse_post_data(environ)
+        data = parse_post_data(raw_body, environ.get("CONTENT_TYPE", ""))
         email = (data.get("email") or "").strip().lower()
         full_name = (data.get("full_name") or "").strip()
         tax_id = (data.get("tax_id") or "").strip()
@@ -441,7 +467,16 @@ def app(environ, start_response):
             order_id, _ = create_paid_order(email, full_name, tax_id, OFFER_PRICE_CENTS, "internal", payment_ref, OFFER_NAME)
             status, headers, body = redirect(f"/thank-you?order={order_id}")
     elif method == "POST" and path == "/webhooks/stripe":
-        data = parse_post_data(environ)
+        if not STRIPE_WEBHOOK_SECRET:
+            status, headers, body = response_json({"ok": False, "error": "stripe webhook no configurado"}, "503 Service Unavailable")
+            start_response(status, headers)
+            return [body]
+        signature = environ.get("HTTP_STRIPE_SIGNATURE", "")
+        if not verify_stripe_signature(raw_body, signature, STRIPE_WEBHOOK_SECRET):
+            status, headers, body = response_json({"ok": False, "error": "invalid signature"}, "401 Unauthorized")
+            start_response(status, headers)
+            return [body]
+        data = parse_post_data(raw_body, environ.get("CONTENT_TYPE", ""))
         event_type = data.get("type", "")
         if event_type != "checkout.session.completed":
             status, headers, body = response_json({"ok": True, "ignored": True})
@@ -494,7 +529,7 @@ def app(environ, start_response):
             order_id = 0
         status, headers, body = response_html(upsell(order_id))
     elif method == "POST" and path == "/upsell/buy":
-        data = parse_post_data(environ)
+        data = parse_post_data(raw_body, environ.get("CONTENT_TYPE", ""))
         try:
             source_order_id = int(data.get("order_id", "0"))
         except ValueError:
@@ -517,7 +552,9 @@ def app(environ, start_response):
             status, headers, body = redirect(f"/thank-you?order={order_id}")
     elif method == "POST" and path == "/automation/run":
         key = (qs.get("key") or [""])[0]
-        if AUTOMATION_RUN_KEY and key != AUTOMATION_RUN_KEY:
+        if not AUTOMATION_RUN_KEY:
+            status, headers, body = response_json({"ok": False, "error": "automation key no configurada"}, "503 Service Unavailable")
+        elif not secrets.compare_digest(key, AUTOMATION_RUN_KEY):
             status, headers, body = response_json({"ok": False, "error": "unauthorized"}, "401 Unauthorized")
         else:
             sent = _run_pending_followups()
