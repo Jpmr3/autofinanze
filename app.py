@@ -13,6 +13,7 @@ BASE_URL = os.getenv("AUTOFINANZE_BASE_URL", "http://127.0.0.1:8000")
 OFFER_NAME = os.getenv("OFFER_NAME", "Sistema Ingresos Rápidos MVP")
 OFFER_PRICE_CENTS = int(os.getenv("OFFER_PRICE_CENTS", "4900"))
 OFFER_CURRENCY = "EUR"
+TAX_RATE = 0.21
 STRIPE_PAYMENT_LINK = os.getenv("STRIPE_PAYMENT_LINK", "").strip()
 AUTOMATION_RUN_KEY = os.getenv("AUTOMATION_RUN_KEY", "").strip()
 
@@ -115,7 +116,7 @@ def record_event(event_type: str, email: str = "", metadata: str = ""):
 
 
 def create_invoice(conn, order_id: int, total_cents: int):
-    tax_cents = int(round(total_cents * 0.21))
+    tax_cents = int(round(total_cents * TAX_RATE))
     subtotal_cents = total_cents - tax_cents
     invoice_number = f"INV-{datetime.now().strftime('%Y%m')}-{order_id:06d}"
     conn.execute(
@@ -379,7 +380,7 @@ def response_json(obj, code: str = "200 OK"):
 
 
 def run_automation():
-    if AUTOMATION_RUN_KEY:
+    if not AUTOMATION_RUN_KEY:
         return False, "AUTOMATION_RUN_KEY requerido"
     sent = _run_pending_followups()
     return True, f"{sent} followups enviados"

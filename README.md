@@ -14,7 +14,7 @@ MVP de monetización en español para vender una oferta digital con:
 ## Ejecutar
 
 ```bash
-cd /home/runner/work/autofinanze/autofinanze
+cd autofinanze
 python app.py
 ```
 
