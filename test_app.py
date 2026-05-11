@@ -41,7 +41,7 @@ class AutofinanzeAppTests(unittest.TestCase):
         self.assertTrue(status.startswith("200"))
         self.assertIn("Convierte tu idea en ventas hoy", body)
 
-    def test_checkout_and_pay_creates_order_invoice_and_delivery(self):
+    def test_pay_creates_complete_order(self):
         status, headers, _ = self._call(
             "POST",
             "/pay",

@@ -2,6 +2,7 @@ import json
 import os
 import secrets
 import sqlite3
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import parse_qs
@@ -14,6 +15,12 @@ OFFER_NAME = os.getenv("OFFER_NAME", "Sistema Ingresos Rápidos MVP")
 OFFER_PRICE_CENTS = int(os.getenv("OFFER_PRICE_CENTS", "4900"))
 OFFER_CURRENCY = "EUR"
 TAX_RATE = 0.21
+UPSELL_PRICE_CENTS = int(os.getenv("UPSELL_PRICE_CENTS", "19900"))
+UPSELL_NAME = os.getenv("UPSELL_NAME", "Implementación asistida 1:1")
+FOLLOWUP_TEMPLATES = [
+    ("email", "¿Te ayudo a implementar el sistema en 24h?", 1),
+    ("whatsapp", "Plantilla rápida para captar más ventas hoy", 3),
+]
 STRIPE_PAYMENT_LINK = os.getenv("STRIPE_PAYMENT_LINK", "").strip()
 AUTOMATION_RUN_KEY = os.getenv("AUTOMATION_RUN_KEY", "").strip()
 
@@ -23,8 +30,9 @@ def now_iso() -> str:
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -116,7 +124,9 @@ def record_event(event_type: str, email: str = "", metadata: str = ""):
 
 
 def create_invoice(conn, order_id: int, total_cents: int):
-    tax_cents = int(round(total_cents * TAX_RATE))
+    tax_cents = int(
+        (Decimal(total_cents) * Decimal(str(TAX_RATE))).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
     subtotal_cents = total_cents - tax_cents
     invoice_number = f"INV-{datetime.now().strftime('%Y%m')}-{order_id:06d}"
     conn.execute(
@@ -138,11 +148,7 @@ def create_delivery(conn, order_id: int):
 
 
 def schedule_followups(conn, email: str):
-    messages = [
-        ("email", "¿Te ayudo a implementar el sistema en 24h?", 1),
-        ("whatsapp", "Plantilla rápida para captar más ventas hoy", 3),
-    ]
-    for channel, message, days in messages:
+    for channel, message, days in FOLLOWUP_TEMPLATES:
         at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
         conn.execute(
             """
@@ -354,7 +360,7 @@ def upsell(order_id: int):
         "Upsell",
         f"""
 <h1>Oferta adicional: Implementación asistida</h1>
-<p>Sesión 1:1 + personalización del embudo por <strong>{money(19900)}</strong></p>
+<p>Sesión 1:1 + personalización del embudo por <strong>{money(UPSELL_PRICE_CENTS)}</strong></p>
 <form method="post" action="/upsell/buy">
   <input type="hidden" name="order_id" value="{order_id}" />
   <button class="btn" type="submit">Agregar upsell</button>
@@ -379,13 +385,6 @@ def response_json(obj, code: str = "200 OK"):
     return code, [("Content-Type", "application/json; charset=utf-8")], json.dumps(obj).encode("utf-8")
 
 
-def run_automation():
-    if not AUTOMATION_RUN_KEY:
-        return False, "AUTOMATION_RUN_KEY requerido"
-    sent = _run_pending_followups()
-    return True, f"{sent} followups enviados"
-
-
 def _run_pending_followups():
     sent_count = 0
     with get_db() as conn:
@@ -406,7 +405,6 @@ def _run_pending_followups():
 
 
 def app(environ, start_response):
-    init_db()
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO", "/")
     qs = parse_qs(environ.get("QUERY_STRING", ""))
@@ -506,16 +504,14 @@ def app(environ, start_response):
         if not source:
             status, headers, body = response_html("Order base no encontrado", "404 Not Found")
         else:
-            upsell_name = "Implementación asistida 1:1"
-            upsell_price = 19900
             order_id, _ = create_paid_order(
                 source["email"],
                 source["full_name"] or "Cliente",
                 source["tax_id"] or "",
-                upsell_price,
+                UPSELL_PRICE_CENTS,
                 "internal",
                 f"upsell_{secrets.token_hex(6)}",
-                upsell_name,
+                UPSELL_NAME,
             )
             record_event("upsell_purchase", source["email"], f"source_order={source_order_id}")
             status, headers, body = redirect(f"/thank-you?order={order_id}")
@@ -533,8 +529,10 @@ def app(environ, start_response):
     return [body]
 
 
+init_db()
+
+
 if __name__ == "__main__":
-    init_db()
     port = int(os.getenv("PORT", "8000"))
     with make_server("0.0.0.0", port, app) as server:
         print(f"Autofinanze MVP escuchando en http://127.0.0.1:{port}")
